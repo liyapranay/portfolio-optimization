@@ -65,6 +65,48 @@ def compute_composite_score(metrics):
     pf = metrics.get('Profit Factor', 0)
     return 0.3 * sharpe + 0.3 * sortino + 0.3 * calmar + 0.1 * pf
 
+def compute_profit_drawdown_robust_composite(metrics,
+                                             profit_scale=10000,
+                                             mdd_scale=0.5,
+                                             dur_scale=365):
+    """
+    Composite Score: ProfitDrawdownRobustComposite
+    Balances profit, risk-adjusted returns, and drawdown control.
+    """
+    profit = metrics.get('Net Profit', 0)
+    sharpe = metrics.get('Sharpe Ratio', 0)
+    sortino = metrics.get('Sortino Ratio', 0)
+    calmar = metrics.get('Calmar Ratio', 0)
+    pf = metrics.get('Profit Factor', 0)
+    psr = metrics.get('PSR', 0)
+    dsr = metrics.get('DSR', 0)
+    mdd = metrics.get('Max Drawdown', 0)
+    mdd_dur = metrics.get('Max Drawdown Duration', 0)
+
+    # Normalize
+    profit_score = min(profit / profit_scale, 1.0)
+    sharpe_score = np.tanh(sharpe)
+    sortino_score = np.tanh(sortino)
+    calmar_score = np.tanh(calmar)
+    pf_score = min(pf / 5.0, 1.0)
+    psr_score = np.clip(psr, 0, 1)
+    dsr_score = np.clip(dsr, 0, 1)
+    mdd_score = 1 - min(mdd / mdd_scale, 1.0)
+    mdd_dur_score = 1 - min(mdd_dur / dur_scale, 1.0)
+
+    # Weighted blend
+    composite = (
+        0.25 * dsr_score +
+        0.15 * psr_score +
+        0.15 * profit_score +
+        0.10 * sharpe_score +
+        0.10 * sortino_score +
+        0.10 * calmar_score +
+        0.05 * pf_score +
+        0.05 * mdd_score +
+        0.05 * mdd_dur_score
+    )
+    return composite
 def optuna_optimize(script_path, fixed_args, optimize_metric, window_id, n_trials, n_jobs, logger):
     def objective(trial):
         params = {
@@ -80,6 +122,8 @@ def optuna_optimize(script_path, fixed_args, optimize_metric, window_id, n_trial
             value = -1e10
         elif optimize_metric == 'Composite Score':
             value = compute_composite_score(metrics)
+        elif optimize_metric == 'ProfitDrawdownRobustComposite':
+            value = compute_profit_drawdown_robust_composite(metrics)
         else:
             value = metrics.get(optimize_metric, -1e10)
         try:
@@ -200,7 +244,7 @@ def optuna_optimize_strategy(script_path, fixed_args, optimize_metric, train_yea
         if test_end > end:
             test_end = end
 
-        print(f"Running Optuna Optimization for window {iteration}...")
+        print(f"Running Optuna Optimization for window {iteration}: Train {current_train_start.strftime('%Y-%m-%d')} to {train_end.strftime('%Y-%m-%d')}, Test {train_end.strftime('%Y-%m-%d')} to {test_end.strftime('%Y-%m-%d')}")
 
         window_id = str(uuid.uuid4())
         save_window({'_id': window_id, 'optimization_run_id': opt_run_id, 'window_number': iteration, 'train_start': current_train_start.strftime('%Y-%m-%d'), 'train_end': train_end.strftime('%Y-%m-%d'), 'test_start': train_end.strftime('%Y-%m-%d'), 'test_end': test_end.strftime('%Y-%m-%d')})
@@ -227,10 +271,11 @@ def optuna_optimize_strategy(script_path, fixed_args, optimize_metric, train_yea
             test_value = -1e10
         elif optimize_metric == 'Composite Score':
             test_value = compute_composite_score(test_metrics)
+        elif optimize_metric == 'ProfitDrawdownRobustComposite':
+            test_value = compute_profit_drawdown_robust_composite(test_metrics)
         else:
             test_value = test_metrics.get(optimize_metric, -1e10)
 
-        print(f"Completed window {iteration}, best params saved.")
 
         window_results.append({
             'iteration': iteration,
@@ -254,7 +299,6 @@ def optuna_optimize_strategy(script_path, fixed_args, optimize_metric, train_yea
     logger.info("Global best params: %s", global_params)
 
     # Global backtest run
-    print("Global backtest run started...")
     logger.info("Global backtest run started with params: %s", global_params)
     global_fixed_args = fixed_args.copy()
     global_fixed_args['start_date'] = start_date
@@ -266,7 +310,6 @@ def optuna_optimize_strategy(script_path, fixed_args, optimize_metric, train_yea
     if 'error' not in global_metrics:
         global_composite = compute_composite_score(global_metrics)
         logger.info("Global backtest completed in %.2f seconds, metrics: %s", global_exec_time, global_metrics)
-        print("Global backtest completed, results saved.")
     else:
         global_composite = 0
         logger.error("Global backtest failed")
@@ -315,7 +358,7 @@ if __name__ == '__main__':
     parser.add_argument('--start_date', type=str, default='2023-01-01', help='Overall start date for optimization')
     parser.add_argument('--end_date', type=str, default='2025-09-25', help='Overall end date for optimization')
     parser.add_argument('--initial_cash', type=int, default=15000, help='Initial cash')
-    parser.add_argument('--optimize_metric', type=str, default='Composite Score', choices=['Net Profit', 'Sharpe Ratio', 'Sortino Ratio', 'Calmar Ratio', 'Profit Factor', 'Composite Score'], help='Metric to optimize')
+    parser.add_argument('--optimize_metric', type=str, default='Composite Score', choices=['Net Profit', 'Sharpe Ratio', 'Sortino Ratio', 'Calmar Ratio', 'Profit Factor', 'Composite Score', 'ProfitDrawdownRobustComposite'], help='Metric to optimize')
     parser.add_argument('--train_years', type=int, default=2, help='Training window in years')
     parser.add_argument('--test_months', type=int, default=6, help='Testing window in months')
     parser.add_argument('--n_trials', type=int, default=50, help='Number of Optuna trials')

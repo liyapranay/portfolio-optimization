@@ -4,6 +4,7 @@ import datetime
 import csv
 import ta
 import numpy as np
+from scipy.stats import norm
 from tabulate import tabulate
 import os
 import uuid
@@ -22,6 +23,83 @@ def str_to_bool(value):
         return False
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
+def calculate_psr(returns, sharpe, benchmark=0.0):
+    """
+    Probabilistic Sharpe Ratio (PSR).
+    Probability that true Sharpe > benchmark.
+    """
+    n = len(returns)
+    if n < 2:
+        return 0.0
+    mean = np.mean(returns)
+    std = np.std(returns, ddof=1)
+    if std == 0:
+        return 0.0
+    sr = mean / std
+    psr = norm.cdf((sr - benchmark) * np.sqrt(n - 1))
+    return float(psr)
+
+def calculate_dsr(returns, sharpe, benchmark=0.0):
+    """
+    Deflated Sharpe Ratio (Bailey et al. 2014).
+    Adjusts PSR for skewness and kurtosis.
+    """
+    n = len(returns)
+    if n < 20:
+        return calculate_psr(returns, sharpe, benchmark)
+    if np.std(returns, ddof=1) == 0:
+        return 0.0
+
+    skew = ((returns - np.mean(returns))**3).mean() / (np.std(returns, ddof=1)**3)
+    kurt = ((returns - np.mean(returns))**4).mean() / (np.std(returns, ddof=1)**4)
+
+    # standard error with skew & kurtosis adjustment
+    se = np.sqrt((1 - skew * sharpe + (kurt - 1) / 4 * sharpe**2) / (n - 1))
+    if se == 0:
+        return 0.0
+
+    dsr = norm.cdf((sharpe - benchmark) / se)
+    dsr = float(np.clip(dsr, 0.0, 0.9999))
+    return dsr
+
+def calculate_max_drawdown_duration(equity_curve):
+    """
+    Max Drawdown Duration = longest period equity stays below its peak.
+    Returns duration in bars.
+    """
+    peaks = np.maximum.accumulate(equity_curve)
+    duration = 0
+    max_duration = 0
+    for eq, pk in zip(equity_curve, peaks):
+        if eq < pk:
+            duration += 1
+            max_duration = max(max_duration, duration)
+        else:
+            duration = 0
+    return int(max_duration)
+def calculate_max_drawdown_duration_days(equity_curve, timeframe):
+    """
+    Convert Max Drawdown Duration bars → trading days.
+    """
+    max_duration = calculate_max_drawdown_duration(equity_curve)
+    bar_seconds = {
+        "minute": 60,
+        "3minute": 180,
+        "5minute": 300,
+        "10minute": 600,
+        "15minute": 900,
+        "30minute": 1800,
+        "60minute": 3600,
+        "day": 86400
+    }.get(timeframe, 1)
+    return (max_duration * bar_seconds) / 86400
+
+def finalize_balance_curve(balance_curve, broker):
+    final_equity = broker.getvalue()
+    if len(balance_curve) == 0 or abs(balance_curve[-1] - final_equity) > 1e-6:
+        balance_curve.append(final_equity)
+    return balance_curve
+    return (max_duration * bar_seconds) / 86400
 
 class NSECommInfo(bt.CommInfoBase):
     params = (
@@ -126,7 +204,7 @@ class MyStrategy(bt.Strategy):
         self.trades = []
         self.balance = self.p.initial_cash
         self.peak_balance = self.p.initial_cash
-        self.balance_points = []
+        self.balance_curve = []
 
     def stop(self):
         pass
@@ -193,18 +271,13 @@ class MyStrategy(bt.Strategy):
                 # Deduct commission from broker cash for non-intraday
                 self.broker.add_cash(-total_comm)
             self.cum_pnl += actual_pnl
-            cash = self.broker.getcash()
-            self.peak_balance = max(self.peak_balance, cash)
-            drawdown = (self.peak_balance - cash) / self.peak_balance if self.peak_balance > 0 else 0
-            dt = self.datas[0].datetime.datetime(0).isoformat()
-            self.balance_points.append({
-                'datetime': dt,
-                'balance': cash,
-                'drawdown': drawdown
-            })
-            logger.info(f"Balance curve updated at {dt}: balance={cash}, drawdown={drawdown}")
+            value = self.broker.getvalue()
+            self.peak_balance = max(self.peak_balance, value)
+            self.balance_curve.append(value)
+            logger.info(f"Balance curve updated: balance={value}")
             strategy_type = 'MIS' if self.intraday else 'CNC'
             exit_reason = self.exit_reason or ''
+            dt = self.datas[0].datetime.datetime(0).isoformat()
             trade_data = {
                 'Datetime': dt,
                 'Transaction ID': self.trade_id,
@@ -384,11 +457,14 @@ if __name__ == '__main__':
     logger.info(f"Final cash={final_cash}, open positions={open_value}, portfolio value={final_value}")
     if abs((final_cash + open_value) - final_value) > 0.01:
         logger.warning("Inconsistency detected between cash, open positions, and portfolio value")
-    # Ensure last balance curve entry equals final_cash
-    if strat.balance_points:
-        last_balance = strat.balance_points[-1]['balance']
-        if abs(last_balance - final_cash) > 0.01:
-            logger.warning(f"Last balance curve entry {last_balance} does not match final_cash {final_cash}")
+
+    # Finalize balance curve
+    final_equity = cerebro.broker.getvalue()
+    if len(strat.balance_curve) == 0 or abs(strat.balance_curve[-1] - final_equity) > 1e-6:
+        print("[DEBUG] Forcing final equity append:")
+        print(f"  Last curve entry: {strat.balance_curve[-1] if strat.balance_curve else 'empty'}")
+        print(f"  Final broker equity: {final_equity}")
+        strat.balance_curve = finalize_balance_curve(strat.balance_curve, cerebro.broker)
 
     # Extract timeframe from data file path
     path_parts = args.data_file.split('/')
@@ -407,10 +483,17 @@ if __name__ == '__main__':
     save_trades(backtest_id, strat.trades)
 
     # Save balance curve
-    for point in strat.balance_points:
-        point['backtest_id'] = backtest_id
-    save_balance_curve(backtest_id, strat.balance_points)
-    logger.info(f"Saved {len(strat.balance_points)} balance curve entries, Final Cash={final_cash}, Final Value={final_value}")
+    balance_points = []
+    for i, b in enumerate(strat.balance_curve):
+        dt = (pd.Timestamp.now() + pd.Timedelta(seconds=i)).isoformat()
+        balance_points.append({
+            'datetime': dt,
+            'balance': b,
+            'drawdown': 0,  # can calculate if needed
+            'backtest_id': backtest_id
+        })
+    save_balance_curve(backtest_id, balance_points)
+    logger.info(f"Saved {len(balance_points)} balance curve entries, Final Cash={final_cash}, Final Value={final_value}")
 
     # Get analyzer results
     drawdown = strat.analyzers.drawdown.get_analysis()
@@ -436,8 +519,14 @@ if __name__ == '__main__':
         equity = initial_cash * (1 + timereturn[d])
         peak_equity = max(peak_equity, equity)
         equity_series[d] = equity
-    # Use max drawdown from balance curve
-    max_drawdown = max((p['drawdown'] for p in strat.balance_points), default=0)
+    # Calculate max drawdown from balance curve
+    equity_curve = np.array(strat.balance_curve)
+    if len(equity_curve) > 0:
+        peaks = np.maximum.accumulate(equity_curve)
+        drawdowns = (peaks - equity_curve) / peaks
+        max_drawdown = np.max(drawdowns)
+    else:
+        max_drawdown = 0
     total_trades = tradeanalyzer.get('total', {}).get('total', 0)
     won_trades = tradeanalyzer.get('won', {}).get('total', 0)
     lost_trades = total_trades - won_trades
@@ -469,9 +558,14 @@ if __name__ == '__main__':
         logger.debug(f"[Sharpe Debug] days={len(daily_returns)}, mean={mean_return:.6f}, std={std_return:.6f}, sharpe={sharpe_ratio:.3f}")
     else:
         sharpe_ratio = 0
-        daily_returns = pd.Series()
-        mean_return = 0
-        logger.debug(f"[Sharpe Debug] days=0, sharpe=0.000")
+    equity_curve = np.array(strat.balance_curve)  # full bar-level balance history
+    returns = np.diff(equity_curve) / equity_curve[:-1] if len(equity_curve) > 1 else np.array([0.0])
+    sharpe = sharpe_ratio
+    psr = calculate_psr(returns, sharpe)
+    dsr = calculate_dsr(returns, sharpe)
+    mdd_bars = calculate_max_drawdown_duration(equity_curve)
+    mdd_days = calculate_max_drawdown_duration_days(equity_curve, timeframe)
+
 
     # Sortino Ratio
     downside_returns = daily_returns[daily_returns < 0]
@@ -502,6 +596,10 @@ if __name__ == '__main__':
         'Sortino Ratio': sortino_ratio,
         'Calmar Ratio': calmar_ratio,
         'Profit Factor': profit_factor,
+        'PSR': psr,
+        'DSR': dsr,
+        'Max Drawdown Duration (bars)': mdd_bars,
+        'Max Drawdown Duration (days)': mdd_days,
         'Final Cash': final_cash,
         'Final Portfolio Value': final_value
     }
@@ -515,6 +613,7 @@ if __name__ == '__main__':
     }
 
     # Save backtest run
+    backtest_doc["metrics"] = metrics
     save_backtest(backtest_doc, metrics, composite)
 
     # Create table
@@ -534,6 +633,10 @@ if __name__ == '__main__':
         ["Sortino Ratio", f"{sortino_ratio:.3f}"],
         ["Calmar Ratio", f"{calmar_ratio:.3f}"],
         ["Profit Factor", f"{profit_factor:.3f}"],
+        ["PSR", f"{psr:.3f}"],
+        ["DSR", f"{dsr:.3f}"],
+        ["Max Drawdown Duration (bars)", f"{mdd_bars}"],
+        ["Max Drawdown Duration (days)", f"{mdd_days:.2f}"],
     ]
 
     print("\nStrategy Performance Metrics:")
