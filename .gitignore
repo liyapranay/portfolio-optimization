@@ -1,0 +1,50 @@
+# Virtual environment
+venv/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[oc]
+*.pyc
+*.pyo
+backtest_script/__pycache__/
+modules/__pycache__/
+quant_dashboard/__pycache__/
+
+# Build and distribution
+build/
+dist/
+wheels/
+*.egg-info
+
+# Data and logs
+data/
+masters/
+transaction_log/
+logs/
+*.log
+
+# Environment and secrets
+.env
+.env.local
+.env.production
+personal_github
+personal_github.pub
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Database
+backtest.db
+
+# Temporary files
+*.tmp
+*.temp
