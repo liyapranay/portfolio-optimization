@@ -70,7 +70,7 @@ if not composite_df.empty:
 
 # Select window for detailed view
 window_options = windows_df['_id'].tolist() + ["global"]
-window_labels = [f"Window {windows_df[windows_df['_id']==x]['window_number'].iloc[0]}" for x in windows_df['_id'].tolist()] + ["Global"]
+window_labels = [f"Window {row['window_number']} - Train {row['train_start']} to {row['train_end']} - Test {row['test_start']} to {row['test_end']}" for _, row in windows_df.iterrows()] + ["Global"]
 selected_window = st.selectbox("Select Window for Details", window_options, format_func=lambda x: window_labels[window_options.index(x)])
 
 # Get backtest for selected window
