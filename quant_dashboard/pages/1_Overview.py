@@ -41,7 +41,7 @@ if not backtest:
     st.write("No backtest found.")
     st.stop()
 
-metrics = backtest.get('metrics', {})
+metrics = backtest.get('metrics', {}) or backtest.get('test_metrics', {})
 composite = backtest.get('composite', {})
 
 sharpe = composite.get('sharpe', 0)
@@ -89,11 +89,9 @@ st.table(metrics_df)
 st.download_button("Download Metrics CSV", metrics_df.to_csv(index=False), "metrics.csv", "text/csv")
 
 st.subheader("End State")
-initial_cash = backtest.get('initial_cash', 15000)
-net_profit = metrics.get('Net Profit', 0)
-final_value = initial_cash + net_profit
-final_cash = final_value  # Assuming no open positions for simplicity
-open_value = 0
+final_cash = metrics.get('Final Cash', 0)
+final_value = metrics.get('Final Portfolio Value', 0)
+open_value = final_value - final_cash
 col1, col2, col3 = st.columns(3)
 with col1:
     st.metric("Final Cash", f"₹{final_cash:,.2f}")

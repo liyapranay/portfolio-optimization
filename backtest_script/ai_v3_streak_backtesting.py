@@ -205,6 +205,7 @@ class MyStrategy(bt.Strategy):
         self.balance = self.p.initial_cash
         self.peak_balance = self.p.initial_cash
         self.balance_curve = []
+        self.logger = logging.getLogger()
 
     def stop(self):
         pass
@@ -239,21 +240,21 @@ class MyStrategy(bt.Strategy):
                     'Exit Reason': ''
                 }
                 self.trades.append(trade_data)
-                logger.info('BUY EXECUTED, Price: %.2f, Cost: %.2f, Comm %.2f' %
+                self.logger.info('BUY EXECUTED, Price: %.2f, Cost: %.2f, Comm %.2f' %
                           (order.executed.price,
-                             order.executed.value,
-                             order.executed.comm))
+                              order.executed.value,
+                              order.executed.comm))
 
             elif order.issell():
                 self.sell_comm = order.executed.comm
                 self.sell_price = order.executed.price
-                logger.info('SELL EXECUTED, Price: %.2f, Cost: %.2f, Comm %.2f' %
+                self.logger.info('SELL EXECUTED, Price: %.2f, Cost: %.2f, Comm %.2f' %
                           (order.executed.price,
-                             order.executed.value,
-                             order.executed.comm))
+                              order.executed.value,
+                              order.executed.comm))
 
         elif order.status in [order.Canceled, order.Margin, order.Rejected]:
-            logger.info('Order Canceled/Margin/Rejected')
+            self.logger.info('Order Canceled/Margin/Rejected')
 
     def notify_trade(self, trade):
         if trade.isclosed:
@@ -273,7 +274,7 @@ class MyStrategy(bt.Strategy):
             self.cum_pnl += actual_pnl
             value = self.broker.getvalue()
             self.peak_balance = max(self.peak_balance, value)
-            logger.info(f"Trade closed: balance={value}")
+            self.logger.info(f"Trade closed: balance={value}")
             strategy_type = 'MIS' if self.intraday else 'CNC'
             exit_reason = self.exit_reason or ''
             dt = self.datas[0].datetime.datetime(0).isoformat()
@@ -291,7 +292,7 @@ class MyStrategy(bt.Strategy):
                 'Exit Reason': exit_reason
             }
             self.trades.append(trade_data)
-            logger.info('OPERATION %d PROFIT, GROSS %.2f, NET %.2f, ACTUAL %.2f' %
+            self.logger.info('OPERATION %d PROFIT, GROSS %.2f, NET %.2f, ACTUAL %.2f' %
                       (self.trade_id, trade.pnl, trade.pnlcomm, actual_pnl))
             self.take_profit = None
             self.stop_loss = None
@@ -326,7 +327,7 @@ class MyStrategy(bt.Strategy):
             self.entry_price = price  # Use current close as proxy for next open
             self.stoploss_price = self.entry_price * (1 - self.stoploss_pct)
             self.takeprofit_price = self.entry_price * (1 + self.takeprofit_pct)
-            logger.info(f'BUY {self.trade_id}, Size: {self.pending_size}, Price: %.2f, SL: %.2f, TP: %.2f' % (self.entry_price, self.stoploss_price, self.takeprofit_price))
+            self.logger.info(f'BUY {self.trade_id}, Size: {self.pending_size}, Price: %.2f, SL: %.2f, TP: %.2f' % (self.entry_price, self.stoploss_price, self.takeprofit_price))
             self.entry_pending = False
             self.pending_size = 0
 
@@ -364,54 +365,31 @@ class MyStrategy(bt.Strategy):
                 self.close()
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Backtesting Script for AI V3 Streak Strategy')
-    parser.add_argument('--data_file', type=str, default='../data/5minute/910_NSE_EICHERMOT.csv', help='Path to the data CSV file')
-    parser.add_argument('--start_date', type=str, default='2022-01-01', help='Start date for backtesting (YYYY-MM-DD)')
-    parser.add_argument('--end_date', type=str, default='2025-09-25', help='End date for backtesting (YYYY-MM-DD)')
-    parser.add_argument('--initial_cash', type=int, default=15000, help='Initial cash for backtesting')
-    parser.add_argument('--intraday', type=str_to_bool, default=False, help='Intraday mode (True/False)')
-    parser.add_argument('--stoploss_pct', type=float, default=0.07, help='Stop loss percentage')
-    parser.add_argument('--takeprofit_pct', type=float, default=0.5, help='Take profit percentage')
-    parser.add_argument('--ema_fast', type=int, default=9, help='EMA fast window')
-    parser.add_argument('--ema_slow', type=int, default=21, help='EMA slow window')
-    parser.add_argument('--adx_threshold', type=int, default=20, help='ADX threshold')
-    parser.add_argument('--momentum_threshold', type=float, default=0, help='Momentum threshold')
-    parser.add_argument('--mfi_ma_threshold', type=int, default=70, help='MFI MA threshold')
-    parser.add_argument('--natr_multiplier', type=float, default=1, help='NATR multiplier')
-    parser.add_argument('--profit_target', type=int, default=250, help='Profit target in rupees')
-    parser.add_argument('--strategy_name', type=str, default='ai_v3_streak', help='Strategy name')
-    parser.add_argument('--optimize_metric', type=str, default='Net Profit', help='Metric to optimize')
-    parser.add_argument('--experiment_id', type=str, default=None, help='Experiment ID')
-    parser.add_argument('--window_id', type=str, default=None, help='Window ID')
-
-    args = parser.parse_args()
-
+def run_backtest(params, start_date, end_date, data_file, initial_cash=15000, intraday=False, strategy_name='ai_v3_streak', optimize_metric='Net Profit', experiment_id=None, window_id=None):
     # Use unified logger from optimizer
     logger = logging.getLogger()
 
     # Load data with pandas
-    data_file = args.data_file
     df = pd.read_csv(data_file)
     ticker = data_file.split("_")[-1].split(".")[0]  # Extract from filename if needed
-    
+
     # Compute indicators using ta
     df['vwap'] = ta.volume.volume_weighted_average_price(df['high'], df['low'], df['close'], df['volume'])
     df['kst'] = ta.trend.kst(df['close'])
     df['adx'] = ta.trend.adx(df['high'], df['low'], df['close'])
-    df['ema_fast'] = ta.trend.ema_indicator(df['close'], window=args.ema_fast)
-    df['ema_slow'] = ta.trend.ema_indicator(df['close'], window=args.ema_slow)
+    df['ema_fast'] = ta.trend.ema_indicator(df['close'], window=params.get('ema_fast', 9))
+    df['ema_slow'] = ta.trend.ema_indicator(df['close'], window=params.get('ema_slow', 21))
     df['rsi'] = ta.momentum.rsi(df['close'])
     df['volume_sma'] = ta.trend.sma_indicator(df['volume'], window=20)
     df['momentum'] = ta.momentum.roc(df['close'], window=14)
     df['mfi'] = ta.volume.money_flow_index(df['high'], df['low'], df['close'], df['volume'], window=14)
     df['mfi_ma'] = ta.trend.sma_indicator(df['mfi'], window=20)
     df['natr'] = ta.volatility.average_true_range(df['high'], df['low'], df['close'], window=14) / df['close'] * 100
-    
+
     # Create datetime index
     df['datetime'] = pd.to_datetime(df['date'] + ' ' + df['time'])
     df.set_index('datetime', inplace=True)
-    
+
     cerebro = bt.Cerebro()
     # Add analyzers
     cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')
@@ -419,41 +397,25 @@ if __name__ == '__main__':
     cerebro.addanalyzer(bt.analyzers.TradeAnalyzer, _name='tradeanalyzer')
     cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn')
 
-    # Add strategy with parameters from args
-    try:
-        start_date = datetime.datetime.strptime(args.start_date, '%Y-%m-%d')
-        end_date = datetime.datetime.strptime(args.end_date, '%Y-%m-%d')
-    except ValueError as e:
-        print(f"Error parsing dates: {e}. Please provide dates in YYYY-MM-DD format.")
-        sys.exit(1)
-    # Generate UUID for this backtest
-    backtest_id = str(uuid.uuid4())
-    initial_cash = args.initial_cash
-    print(f'Backtest UUID: {backtest_id}')
-    print(f'Initial Cash: {initial_cash}')
-
-    cerebro.addstrategy(MyStrategy, only_long=1, intraday=args.intraday, stoploss_pct=args.stoploss_pct, takeprofit_pct=args.takeprofit_pct, stock_symbol=ticker,
-                        initial_cash=args.initial_cash, ema_fast_window=args.ema_fast, ema_slow_window=args.ema_slow, adx_threshold=args.adx_threshold,
-                        momentum_threshold=args.momentum_threshold, mfi_ma_threshold=args.mfi_ma_threshold,
-                        natr_multiplier=args.natr_multiplier, profit_target=args.profit_target)
+    # Add strategy with parameters
+    cerebro.addstrategy(MyStrategy, only_long=1, intraday=intraday, stoploss_pct=params.get('stoploss_pct', 0.07), takeprofit_pct=params.get('takeprofit_pct', 0.5), stock_symbol=ticker,
+                        initial_cash=initial_cash, ema_fast_window=params.get('ema_fast', 9), ema_slow_window=params.get('ema_slow', 21), adx_threshold=params.get('adx_threshold', 20),
+                        momentum_threshold=params.get('momentum_threshold', 0), mfi_ma_threshold=params.get('mfi_ma_threshold', 70),
+                        natr_multiplier=params.get('natr_multiplier', 1), profit_target=params.get('profit_target', 250))
 
     data = MyPandasData(dataname=df, fromdate=start_date, todate=end_date, timeframe=bt.TimeFrame.Minutes, compression=5)
 
     cerebro.adddata(data)
     cerebro.broker.setcash(initial_cash)
-    if args.intraday:
+    if intraday:
         cerebro.broker.addcommissioninfo(NSECommInfo())
     else:
         cerebro.broker.addcommissioninfo(bt.CommInfoBase())
-
-    print('Starting Portfolio Value: %.2f' % cerebro.broker.getvalue())
 
     bt_start = time.time()
     results = cerebro.run()
     bt_time = time.time() - bt_start
     strat = results[0]
-
-    print('Final Portfolio Value: %.2f' % cerebro.broker.getvalue())
 
     # Create balance DataFrame
     balance_df = pd.DataFrame(strat.balance_curve)
@@ -465,31 +427,26 @@ if __name__ == '__main__':
     if abs(balance_df["balance"].iloc[-1] - final_balance) > 1e-6:
         balance_df.loc[balance_df.index[-1], "balance"] = final_balance
 
-    print(f"[DEBUG] Balance curve starts {balance_df.index[0]} ends {balance_df.index[-1]}")
     logger.info("Backtest execution time: %.2f seconds", bt_time)
 
     # Final metrics
     final_cash = cerebro.broker.getcash()
     final_value = cerebro.broker.getvalue()
     open_value = final_value - final_cash
-    logger.info(f"Final cash={final_cash}, open positions={open_value}, portfolio value={final_value}")
-    if abs((final_cash + open_value) - final_value) > 0.01:
-        logger.warning("Inconsistency detected between cash, open positions, and portfolio value")
-
-    # Finalize balance curve is handled above
 
     # Extract timeframe from data file path
-    path_parts = args.data_file.split('/')
+    path_parts = data_file.split('/')
     timeframe = path_parts[2] if len(path_parts) > 2 else 'day'  # Default to 'day' if not found
 
+    # Generate UUID for this backtest
+    backtest_id = str(uuid.uuid4())
+
     # Save strategy
-    save_strategy({'_id': args.strategy_name, 'name': 'AI V3 Streak Strategy', 'description': 'AI-based streak strategy', 'asset_class': 'equity', 'timeframe': timeframe})
+    save_strategy({'_id': strategy_name, 'name': 'AI V3 Streak Strategy', 'description': 'AI-based streak strategy', 'asset_class': 'equity', 'timeframe': timeframe})
 
     # Prepare backtest doc
-    import datetime
     timestamp = datetime.datetime.now().isoformat()
-    params = vars(args)  # Save all arguments as params
-    backtest_doc = {'_id': backtest_id, 'timestamp': timestamp, 'strategy_id': args.strategy_name, 'params': params, 'stock_symbol': ticker, 'timeframe': timeframe, 'start_date': args.start_date, 'end_date': args.end_date, 'initial_cash': initial_cash, 'final_value': cerebro.broker.getvalue(), 'window_id': args.window_id, 'experiment_id': args.experiment_id, 'datetime_range': {'start': args.start_date, 'end': args.end_date}}
+    backtest_doc = {'_id': backtest_id, 'timestamp': timestamp, 'strategy_id': strategy_name, 'params': params, 'stock_symbol': ticker, 'timeframe': timeframe, 'start_date': start_date.strftime('%Y-%m-%d'), 'end_date': end_date.strftime('%Y-%m-%d'), 'initial_cash': initial_cash, 'final_value': cerebro.broker.getvalue(), 'window_id': window_id, 'experiment_id': experiment_id, 'datetime_range': {'start': start_date.strftime('%Y-%m-%d'), 'end': end_date.strftime('%Y-%m-%d')}}
 
     # Save trade logs
     save_trades(backtest_id, strat.trades)
@@ -498,7 +455,6 @@ if __name__ == '__main__':
     for point in strat.balance_curve:
         point['backtest_id'] = backtest_id
     save_balance_curve(backtest_id, strat.balance_curve)
-    logger.info(f"Saved {len(strat.balance_curve)} balance curve entries, Final Cash={final_cash}, Final Value={final_value}")
 
     # Get analyzer results
     drawdown = strat.analyzers.drawdown.get_analysis()
@@ -516,7 +472,7 @@ if __name__ == '__main__':
         annualized_return = (1 + total_return) ** (365.25 / period_days) - 1
     else:
         annualized_return = 0
-    net_profit = cerebro.broker.getvalue() - initial_cash
+    net_profit = strat.cum_pnl
     # Calculate equity curve and drawdown with cumulative compounding
     equity_series = pd.Series(dtype=float)
     peak_equity = initial_cash
@@ -560,7 +516,6 @@ if __name__ == '__main__':
         mean_return = daily_returns.mean()
         std_return = daily_returns.std(ddof=1)
         sharpe_ratio = (mean_return / std_return) * np.sqrt(252) if std_return > 0 else 0
-        logger.debug(f"[Sharpe Debug] days={len(daily_returns)}, mean={mean_return:.6f}, std={std_return:.6f}, sharpe={sharpe_ratio:.3f}")
     else:
         sharpe_ratio = 0
     equity_curve = np.array([p['balance'] for p in strat.balance_curve])  # full bar-level balance history
@@ -579,7 +534,6 @@ if __name__ == '__main__':
         sortino_ratio = (mean_return / downside_dev) * np.sqrt(252) if downside_dev > 0 else 0
     else:
         sortino_ratio = 0
-    logger.debug(f"[Sortino Debug] mean={mean_return:.6f}, downside_std={downside_returns.std(ddof=1) if not downside_returns.empty else 0:.6f}, sortino={sortino_ratio:.3f}")
 
     # Calmar Ratio
     calmar_ratio = annualized_return / max_drawdown if max_drawdown > 0 else 0
@@ -621,55 +575,82 @@ if __name__ == '__main__':
     backtest_doc["metrics"] = metrics
     save_backtest(backtest_doc, metrics, composite)
 
+    return metrics, backtest_id, total_trades, won_trades, lost_trades, total_commission
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Backtesting Script for AI V3 Streak Strategy')
+    parser.add_argument('--data_file', type=str, default='../data/5minute/910_NSE_EICHERMOT.csv', help='Path to the data CSV file')
+    parser.add_argument('--start_date', type=str, default='2022-01-01', help='Start date for backtesting (YYYY-MM-DD)')
+    parser.add_argument('--end_date', type=str, default='2025-09-25', help='End date for backtesting (YYYY-MM-DD)')
+    parser.add_argument('--initial_cash', type=int, default=15000, help='Initial cash for backtesting')
+    parser.add_argument('--intraday', type=str_to_bool, default=False, help='Intraday mode (True/False)')
+    parser.add_argument('--stoploss_pct', type=float, default=0.07, help='Stop loss percentage')
+    parser.add_argument('--takeprofit_pct', type=float, default=0.5, help='Take profit percentage')
+    parser.add_argument('--ema_fast', type=int, default=9, help='EMA fast window')
+    parser.add_argument('--ema_slow', type=int, default=21, help='EMA slow window')
+    parser.add_argument('--adx_threshold', type=int, default=20, help='ADX threshold')
+    parser.add_argument('--momentum_threshold', type=float, default=0, help='Momentum threshold')
+    parser.add_argument('--mfi_ma_threshold', type=int, default=70, help='MFI MA threshold')
+    parser.add_argument('--natr_multiplier', type=float, default=1, help='NATR multiplier')
+    parser.add_argument('--profit_target', type=int, default=250, help='Profit target in rupees')
+    parser.add_argument('--strategy_name', type=str, default='ai_v3_streak', help='Strategy name')
+    parser.add_argument('--optimize_metric', type=str, default='Net Profit', help='Metric to optimize')
+    parser.add_argument('--experiment_id', type=str, default=None, help='Experiment ID')
+    parser.add_argument('--window_id', type=str, default=None, help='Window ID')
+
+    args = parser.parse_args()
+
+    params = {
+        'ema_fast': args.ema_fast,
+        'ema_slow': args.ema_slow,
+        'adx_threshold': args.adx_threshold,
+        'momentum_threshold': args.momentum_threshold,
+        'natr_multiplier': args.natr_multiplier,
+        'profit_target': args.profit_target,
+        'stoploss_pct': args.stoploss_pct,
+        'takeprofit_pct': args.takeprofit_pct
+    }
+
+    start_date = datetime.datetime.strptime(args.start_date, '%Y-%m-%d')
+    end_date = datetime.datetime.strptime(args.end_date, '%Y-%m-%d')
+
+    metrics, backtest_id, total_trades, won_trades, lost_trades, total_commission = run_backtest(params, start_date, end_date, args.data_file, args.initial_cash, args.intraday, args.strategy_name, args.optimize_metric, args.experiment_id, args.window_id)
+
+    print(f'Backtest UUID: {backtest_id}')
+    print(f'Initial Cash: {args.initial_cash}')
+    print('Starting Portfolio Value: %.2f' % args.initial_cash)
+    print('Final Portfolio Value: %.2f' % metrics.get('Final Portfolio Value', 0))
+
     # Create table
     table = [
-        ["Total/Cumulative Return", f"{total_return:.2%}"],
-        ["Annualized Return (CAGR)", f"{annualized_return:.2%}"],
-        ["Net Profit", f"{net_profit:.2f}"],
-        ["Maximum Drawdown (MDD)", f"{max_drawdown:.2%}"],
+        ["Total/Cumulative Return", f"{metrics['Total Return']:.2%}"],
+        ["Annualized Return (CAGR)", f"{metrics['Annualized Return']:.2%}"],
+        ["Net Profit", f"{metrics['Net Profit']:.2f}"],
+        ["Maximum Drawdown (MDD)", f"{metrics['Max Drawdown']:.2%}"],
         ["Total number of trades", str(total_trades)],
         ["Number of wins", str(won_trades)],
         ["Number of losses", str(lost_trades)],
-        ["Winning streak", str(winning_streak)],
-        ["Losing streak", str(losing_streak)],
+        ["Winning streak", str(int(metrics['Winning Streak']))],
+        ["Losing streak", str(int(metrics['Losing Streak']))],
         ["Total commission (Zerodha)", f"{total_commission:.2f}"],
-        ["Actual profit", f"{net_profit:.2f}"],
-        ["Sharpe Ratio", f"{sharpe_ratio:.3f}"],
-        ["Sortino Ratio", f"{sortino_ratio:.3f}"],
-        ["Calmar Ratio", f"{calmar_ratio:.3f}"],
-        ["Profit Factor", f"{profit_factor:.3f}"],
-        ["PSR", f"{psr:.3f}"],
-        ["DSR", f"{dsr:.3f}"],
-        ["Max Drawdown Duration (bars)", f"{mdd_bars}"],
-        ["Max Drawdown Duration (days)", f"{mdd_days:.2f}"],
+        ["Actual profit", f"{metrics['Net Profit']:.2f}"],
+        ["Sharpe Ratio", f"{metrics['Sharpe Ratio']:.3f}"],
+        ["Sortino Ratio", f"{metrics['Sortino Ratio']:.3f}"],
+        ["Calmar Ratio", f"{metrics['Calmar Ratio']:.3f}"],
+        ["Profit Factor", f"{metrics['Profit Factor']:.3f}"],
+        ["PSR", f"{metrics['PSR']:.3f}"],
+        ["DSR", f"{metrics['DSR']:.3f}"],
+        ["Max Drawdown Duration (bars)", f"{metrics['Max Drawdown Duration (bars)']}"],
+        ["Max Drawdown Duration (days)", f"{metrics['Max Drawdown Duration (days)']:.2f}"],
     ]
 
     print("\nStrategy Performance Metrics:")
     print(tabulate(table, headers=["Metric", "Value"], tablefmt="grid"))
 
-    # Resample equity curve
-    equity_df = pd.DataFrame({'equity': equity_series})
-    equity_df.index = pd.to_datetime(equity_df.index)
-    daily_equity = equity_df.resample('D').last()
-    equity_data_daily = [{'datetime': d.strftime('%Y-%m-%d'), 'equity': row['equity'], 'return_pct': 0, 'drawdown': 0} for d, row in daily_equity.iterrows()]
-
-    # Trade-level equity
-    trade_datetimes = [pd.to_datetime(t['Datetime']) for t in trades]
-    trade_equity = [{'datetime': dt.strftime('%Y-%m-%d %H:%M:%S'), 'equity': equity_series[dt], 'return_pct': 0, 'drawdown': 0} for dt in trade_datetimes if dt in equity_series.index]
-
-    print(f"Max drawdown: {max_drawdown:.2%}")
-
-    # Calculate and save rolling metrics
-    rolling_window = 252
-    if len(daily_returns) > rolling_window:
-        rolling_sharpe = daily_returns.rolling(window=rolling_window).apply(lambda x: x.mean() / x.std() * np.sqrt(252) if x.std() > 0 else 0)
-        rolling_sortino = daily_returns.rolling(window=rolling_window).apply(lambda x: x.mean() / (x[x < 0].std()) * np.sqrt(252) if x[x < 0].std() > 0 else 0)
-        rolling_drawdown = (daily_returns.cumsum() - daily_returns.cumsum().expanding().max()).rolling(window=rolling_window).min()
-        rolling_metrics_list = [{'datetime': str(d), 'sharpe': rolling_sharpe.loc[d], 'drawdown': rolling_drawdown.loc[d], 'sortino': rolling_sortino.loc[d]} for d in daily_returns.index if d in rolling_sharpe.index and pd.notna(rolling_sharpe.loc[d])]
-        save_rolling_metrics(backtest_id, rolling_metrics_list)
+    print(f"Max drawdown: {metrics['Max Drawdown']:.2%}")
 
     # Output metrics for optimizer
     for key, value in metrics.items():
         print(f"{key}: {value}")
-    optimized_value = metrics.get(args.optimize_metric, net_profit)  # Default to net_profit if not found
+    optimized_value = metrics.get(args.optimize_metric, metrics['Net Profit'])
     print(f"Optimized Metric ({args.optimize_metric}): {optimized_value}")

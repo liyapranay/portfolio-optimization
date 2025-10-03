@@ -83,16 +83,33 @@ def save_iteration(iter_doc):
 
 def save_backtest(backtest_doc, metrics=None, composite=None):
     try:
-        if metrics:
-            backtest_doc['metrics'] = metrics
+        # FIX: Explicitly persist train and test metrics if present
+        if 'train_metrics' in backtest_doc:
+            db.backtests.update_one(
+                {'_id': backtest_doc['_id']},
+                {'$set': {'train_metrics': backtest_doc['train_metrics']}},
+                upsert=True
+            )
+        if 'test_metrics' in backtest_doc:
+            db.backtests.update_one(
+                {'_id': backtest_doc['_id']},
+                {'$set': {'test_metrics': backtest_doc['test_metrics']}},
+                upsert=True
+            )
+
+        # Legacy fallback: if caller only provided a single metrics dict
+        if metrics and 'train_metrics' not in backtest_doc and 'test_metrics' not in backtest_doc:
+            backtest_doc['metrics'] = metrics  # FIX: keep backwards compatibility
+
         if composite:
             backtest_doc['composite'] = composite
+
         if '_id' in backtest_doc:
-            result = db.backtests.replace_one({'_id': backtest_doc['_id']}, backtest_doc, upsert=True)
-            print(f"Upserted backtest with _id: {backtest_doc['_id']}")
+            doc_to_set = {k: v for k, v in backtest_doc.items() if k != '_id'}
+            db.backtests.update_one({'_id': backtest_doc['_id']}, {'$set': doc_to_set}, upsert=True)
         else:
-            result = db.backtests.insert_one(backtest_doc)
-            print(f"Inserted backtest with _id: {result.inserted_id}")
+            db.backtests.insert_one(backtest_doc)
+
     except PyMongoError as e:
         print(f"Error saving backtest: {e}")
 

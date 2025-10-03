@@ -75,22 +75,23 @@ selected_window = st.selectbox("Select Window for Details", window_options, form
 
 # Get backtest for selected window
 if selected_window == "global":
-    backtest = db.backtests.find_one({'optimization_run_id': uuid.UUID(selected_opt_run_str), 'scope': 'global'})
+    backtest = db.backtests.find_one({
+        'optimization_run_id': uuid.UUID(selected_opt_run_str),
+        'scope': 'global'
+    })
 else:
-    backtest = db.backtests.find_one({'window_id': selected_window})
+    backtest = db.backtests.find_one({
+        'window_id': selected_window,
+        'scope': 'window'    # FIX: only pick window docs, not train
+    })
 
 if backtest:
     backtest_id = backtest.get('_id')
-    metrics = backtest.get('metrics', {})
+    train_metrics_raw = backtest.get('train_metrics', {})
+    test_metrics_raw = backtest.get('test_metrics', {}) or backtest.get('metrics', {})
 
-    # For global, no train metrics
-    if selected_window == "global":
-        train_metrics = pd.DataFrame()
-        test_metrics = pd.DataFrame([{'metric_name': k, 'value': format_metric(k, v)} for k, v in metrics.items()])
-    else:
-        # For window, try to get train metrics from optimization iterations or something, but for now, empty
-        train_metrics = pd.DataFrame()
-        test_metrics = pd.DataFrame([{'metric_name': k, 'value': format_metric(k, v)} for k, v in metrics.items()])
+    train_metrics = pd.DataFrame([{'metric_name': k, 'value': format_metric(k, v)} for k, v in train_metrics_raw.items()]) if train_metrics_raw else pd.DataFrame()
+    test_metrics = pd.DataFrame([{'metric_name': k, 'value': format_metric(k, v)} for k, v in test_metrics_raw.items()]) if test_metrics_raw else pd.DataFrame()
 
     st.subheader("Performance Metrics")
     col1, col2 = st.columns(2)
@@ -106,6 +107,15 @@ if backtest:
             st.write("No test metrics recorded.")
         else:
             st.dataframe(test_metrics)
+
+    # Overfitting check
+    if not train_metrics.empty and not test_metrics.empty:
+        train_sharpe = train_metrics_raw.get('Sharpe Ratio')
+        test_sharpe = test_metrics_raw.get('Sharpe Ratio')
+        if train_sharpe is not None and test_sharpe is not None and train_sharpe != 0:
+            diff_pct = abs(train_sharpe - test_sharpe) / abs(train_sharpe)
+            if diff_pct > 0.3:
+                st.warning(f"⚠️ Overfitting Alert: Train Sharpe {train_sharpe:.2f} vs Test Sharpe {test_sharpe:.2f} ({diff_pct:.1%} difference)")
 
     # Balance curve
     balance_data = get_balance_curve(backtest_id)

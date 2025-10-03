@@ -16,6 +16,7 @@ import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from collections import Counter
+from ai_v3_streak_backtesting import run_backtest as run_backtest_func
 
 # Strategy file being optimized
 STRATEGY_FILE = 'ai_v3_streak_backtesting.py'
@@ -26,37 +27,22 @@ def generate_experiment_name():
     return f"{random.choice(animals)}-{rand}"
 
 def run_backtest(params, script_path, fixed_args, logger):
-    # Convert params to command line args
-    cmd = ['python3', script_path]
-    for key, value in fixed_args.items():
-        cmd.extend(['--' + key, str(value)])
-    for key, value in params.items():
-        cmd.extend(['--' + key, str(value)])
-    # Run the backtest
+    # Call the backtest function directly
     start_time = time.time()
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd='.')
-    exec_time = time.time() - start_time
-    if result.returncode != 0:
-        logger.error(f"Error running backtest: {result.stderr}")
-        return {'error': True}, None, exec_time  # Return dict with error
-
-    # Parse metrics from output
-    metrics = {}
-    backtest_id = None
-    lines = result.stdout.split('\n')
-    for line in lines:
-        if line.startswith('Backtest UUID:'):
-            backtest_id = line.split('Backtest UUID:')[1].strip()
-        elif ': ' in line and not line.startswith('[') and not line.startswith('Backtest') and not line.startswith('Initial') and not line.startswith('Starting') and not line.startswith('Final') and not line.startswith('Optimized'):
-            parts = line.split(': ')
-            if len(parts) == 2:
-                key = parts[0].strip()
-                try:
-                    value = float(parts[1].strip())
-                    metrics[key] = value
-                except ValueError:
-                    pass
-    return metrics, backtest_id, exec_time
+    start_date = datetime.strptime(fixed_args['start_date'], '%Y-%m-%d')
+    end_date = datetime.strptime(fixed_args['end_date'], '%Y-%m-%d')
+    data_file = fixed_args['data_file']
+    initial_cash = fixed_args['initial_cash']
+    intraday = fixed_args.get('intraday', False)
+    experiment_id = fixed_args.get('experiment_id')
+    window_id = fixed_args.get('window_id')
+    try:
+        metrics, backtest_id, *_ = run_backtest_func(params, start_date, end_date, data_file, initial_cash, intraday, 'ai_v3_streak', 'Net Profit', experiment_id, window_id)
+        exec_time = time.time() - start_time
+        return metrics, backtest_id, exec_time
+    except Exception as e:
+        logger.error(f"Error running backtest: {e}")
+        return {'error': True}, None, time.time() - start_time
 
 def compute_composite_score(metrics):
     sharpe = metrics.get('Sharpe Ratio', 0)
@@ -152,8 +138,10 @@ def optuna_optimize(script_path, fixed_args, optimize_metric, window_id, n_trial
     study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs)
     best_params = study.best_params
     best_value = study.best_value
+    # Get train metrics for best params
+    train_metrics, train_backtest_id, _ = run_backtest(best_params, script_path, fixed_args, logger)
     logger.info("Optuna Optimization completed")
-    return best_params, best_value
+    return best_params, best_value, train_metrics, train_backtest_id
 
 def select_global_best_params(window_results, method='majority'):
     if method == 'majority':
@@ -257,7 +245,22 @@ def optuna_optimize_strategy(script_path, fixed_args, optimize_metric, train_yea
         train_fixed_args['window_id'] = window_id
 
         # Optuna Optimization
-        best_params, best_value = optuna_optimize(script_path, train_fixed_args, optimize_metric, window_id, n_trials, n_jobs, logger)
+        best_params, best_value, train_metrics, train_backtest_id = optuna_optimize(script_path, train_fixed_args, optimize_metric, window_id, n_trials, n_jobs, logger)
+
+        # Save explicit train backtest (optional, for transparency)
+        train_doc = {
+            "_id": train_backtest_id,
+            "experiment_id": experiment_id,
+            "strategy_id": strategy_id,
+            "stock_symbol": stock_symbol,
+            "timeframe": timeframe,
+            "params": best_params,
+            "metrics": train_metrics,
+            "scope": "train",
+            "window_number": iteration,
+            "timestamp": datetime.utcnow()
+        }
+        save_backtest(train_doc, train_metrics)   # FIX: persist train run
 
         # Testing phase
         test_fixed_args = fixed_args.copy()
@@ -276,6 +279,26 @@ def optuna_optimize_strategy(script_path, fixed_args, optimize_metric, train_yea
         else:
             test_value = test_metrics.get(optimize_metric, -1e10)
 
+        # Save window backtest with train and test metrics
+        backtest_doc = {
+            "_id": test_backtest_id,
+            "experiment_id": experiment_id,
+            "strategy_id": strategy_id,
+            "stock_symbol": stock_symbol,
+            "timeframe": timeframe,
+            "params": best_params,
+            "train_metrics": train_metrics,
+            "test_metrics": test_metrics,
+            "scope": "window",
+            "window_number": iteration,
+            "timestamp": datetime.utcnow()
+        }
+        composite = {'sharpe': test_metrics.get('Sharpe Ratio', 0), 'sortino': test_metrics.get('Sortino Ratio', 0), 'calmar': test_metrics.get('Calmar Ratio', 0), 'profit_factor': test_metrics.get('Profit Factor', 0), 'composite_score': test_value}
+        logger.info(f"backtest_doc keys: {list(backtest_doc.keys())}, train_metrics keys: {list(train_metrics.keys())}, test_metrics keys: {list(test_metrics.keys())}")
+        # FIX: Explicitly persist both train and test metrics into backtest_doc
+        backtest_doc['train_metrics'] = train_metrics   # FIX: Add train metrics
+        backtest_doc['test_metrics'] = test_metrics     # FIX: Add test metrics
+        save_backtest(backtest_doc, None, composite)    # Ensure both are stored
 
         window_results.append({
             'iteration': iteration,
@@ -331,8 +354,10 @@ def optuna_optimize_strategy(script_path, fixed_args, optimize_metric, train_yea
             'experiment_id': experiment_id,
             'scope': 'global',
             'optimization_run_id': opt_run_id,
-            'exec_time': global_exec_time
+            'exec_time': global_exec_time,
+            'test_metrics': global_metrics
         }
+        logger.info(f"Saving global backtest with test_metrics keys: {list(global_metrics.keys())}")
         save_backtest(global_backtest_doc, global_metrics, {'sharpe': global_metrics.get('Sharpe Ratio', 0), 'sortino': global_metrics.get('Sortino Ratio', 0), 'calmar': global_metrics.get('Calmar Ratio', 0), 'profit_factor': global_metrics.get('Profit Factor', 0), 'composite_score': global_composite})
 
     # Update optimization run with global best
