@@ -273,8 +273,7 @@ class MyStrategy(bt.Strategy):
             self.cum_pnl += actual_pnl
             value = self.broker.getvalue()
             self.peak_balance = max(self.peak_balance, value)
-            self.balance_curve.append(value)
-            logger.info(f"Balance curve updated: balance={value}")
+            logger.info(f"Trade closed: balance={value}")
             strategy_type = 'MIS' if self.intraday else 'CNC'
             exit_reason = self.exit_reason or ''
             dt = self.datas[0].datetime.datetime(0).isoformat()
@@ -312,6 +311,13 @@ class MyStrategy(bt.Strategy):
         price = self.data.close[0]
         volume = self.data.volume[0]
         current_time = self.data.datetime.time(0)
+
+        # Update balance curve per bar
+        dt = self.data.datetime.datetime(0).isoformat()
+        balance = self.broker.getvalue()
+        self.peak_balance = max(self.peak_balance, balance)
+        drawdown = (self.peak_balance - balance) / self.peak_balance if self.peak_balance > 0 else 0
+        self.balance_curve.append({"datetime": dt, "balance": balance, "drawdown": drawdown})
 
         # Execute pending entry on this bar's open (simulated by placing at close of previous signal bar, but delayed)
         if self.entry_pending and not self.position:
@@ -448,6 +454,18 @@ if __name__ == '__main__':
     strat = results[0]
 
     print('Final Portfolio Value: %.2f' % cerebro.broker.getvalue())
+
+    # Create balance DataFrame
+    balance_df = pd.DataFrame(strat.balance_curve)
+    balance_df["datetime"] = pd.to_datetime(balance_df["datetime"])
+    balance_df.set_index("datetime", inplace=True)
+
+    # Ensure final balance is correct
+    final_balance = cerebro.broker.getvalue()
+    if abs(balance_df["balance"].iloc[-1] - final_balance) > 1e-6:
+        balance_df.loc[balance_df.index[-1], "balance"] = final_balance
+
+    print(f"[DEBUG] Balance curve starts {balance_df.index[0]} ends {balance_df.index[-1]}")
     logger.info("Backtest execution time: %.2f seconds", bt_time)
 
     # Final metrics
@@ -458,13 +476,7 @@ if __name__ == '__main__':
     if abs((final_cash + open_value) - final_value) > 0.01:
         logger.warning("Inconsistency detected between cash, open positions, and portfolio value")
 
-    # Finalize balance curve
-    final_equity = cerebro.broker.getvalue()
-    if len(strat.balance_curve) == 0 or abs(strat.balance_curve[-1] - final_equity) > 1e-6:
-        print("[DEBUG] Forcing final equity append:")
-        print(f"  Last curve entry: {strat.balance_curve[-1] if strat.balance_curve else 'empty'}")
-        print(f"  Final broker equity: {final_equity}")
-        strat.balance_curve = finalize_balance_curve(strat.balance_curve, cerebro.broker)
+    # Finalize balance curve is handled above
 
     # Extract timeframe from data file path
     path_parts = args.data_file.split('/')
@@ -477,23 +489,16 @@ if __name__ == '__main__':
     import datetime
     timestamp = datetime.datetime.now().isoformat()
     params = vars(args)  # Save all arguments as params
-    backtest_doc = {'_id': backtest_id, 'timestamp': timestamp, 'strategy_id': args.strategy_name, 'params': params, 'stock_symbol': ticker, 'timeframe': timeframe, 'start_date': args.start_date, 'end_date': args.end_date, 'initial_cash': initial_cash, 'final_value': cerebro.broker.getvalue(), 'window_id': args.window_id, 'experiment_id': args.experiment_id}
+    backtest_doc = {'_id': backtest_id, 'timestamp': timestamp, 'strategy_id': args.strategy_name, 'params': params, 'stock_symbol': ticker, 'timeframe': timeframe, 'start_date': args.start_date, 'end_date': args.end_date, 'initial_cash': initial_cash, 'final_value': cerebro.broker.getvalue(), 'window_id': args.window_id, 'experiment_id': args.experiment_id, 'datetime_range': {'start': args.start_date, 'end': args.end_date}}
 
     # Save trade logs
     save_trades(backtest_id, strat.trades)
 
     # Save balance curve
-    balance_points = []
-    for i, b in enumerate(strat.balance_curve):
-        dt = (pd.Timestamp.now() + pd.Timedelta(seconds=i)).isoformat()
-        balance_points.append({
-            'datetime': dt,
-            'balance': b,
-            'drawdown': 0,  # can calculate if needed
-            'backtest_id': backtest_id
-        })
-    save_balance_curve(backtest_id, balance_points)
-    logger.info(f"Saved {len(balance_points)} balance curve entries, Final Cash={final_cash}, Final Value={final_value}")
+    for point in strat.balance_curve:
+        point['backtest_id'] = backtest_id
+    save_balance_curve(backtest_id, strat.balance_curve)
+    logger.info(f"Saved {len(strat.balance_curve)} balance curve entries, Final Cash={final_cash}, Final Value={final_value}")
 
     # Get analyzer results
     drawdown = strat.analyzers.drawdown.get_analysis()
@@ -520,10 +525,10 @@ if __name__ == '__main__':
         peak_equity = max(peak_equity, equity)
         equity_series[d] = equity
     # Calculate max drawdown from balance curve
-    equity_curve = np.array(strat.balance_curve)
-    if len(equity_curve) > 0:
-        peaks = np.maximum.accumulate(equity_curve)
-        drawdowns = (peaks - equity_curve) / peaks
+    balance_values = np.array([p['balance'] for p in strat.balance_curve])
+    if len(balance_values) > 0:
+        peaks = np.maximum.accumulate(balance_values)
+        drawdowns = (peaks - balance_values) / peaks
         max_drawdown = np.max(drawdowns)
     else:
         max_drawdown = 0
@@ -558,7 +563,7 @@ if __name__ == '__main__':
         logger.debug(f"[Sharpe Debug] days={len(daily_returns)}, mean={mean_return:.6f}, std={std_return:.6f}, sharpe={sharpe_ratio:.3f}")
     else:
         sharpe_ratio = 0
-    equity_curve = np.array(strat.balance_curve)  # full bar-level balance history
+    equity_curve = np.array([p['balance'] for p in strat.balance_curve])  # full bar-level balance history
     returns = np.diff(equity_curve) / equity_curve[:-1] if len(equity_curve) > 1 else np.array([0.0])
     sharpe = sharpe_ratio
     psr = calculate_psr(returns, sharpe)
