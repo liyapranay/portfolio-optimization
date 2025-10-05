@@ -40,33 +40,52 @@ if windows_df.empty:
     st.write("No windows found.")
     st.stop()
 
+# Convert UUIDs to strings for querying
+windows_df['_id'] = windows_df['_id'].astype(str)
+
 st.subheader("Windows")
 st.dataframe(windows_df[['_id', 'window_number', 'train_start', 'train_end', 'test_start', 'test_end']])
 
 # Get composite metrics for all windows
 window_ids = windows_df['_id'].tolist()
 backtests = list(db.backtests.find({'window_id': {'$in': window_ids}}))
+
 composite_data = []
 for b in backtests:
     if 'composite' in b:
         comp = b['composite']
         window = windows_df[windows_df['_id'] == b['window_id']]
         if not window.empty:
-            window_number = window['window_number'].iloc[0]
+            window_number = int(window['window_number'].iloc[0])  # Convert to regular int
             composite_data.append({
-                'sharpe': comp.get('sharpe', 0),
-                'sortino': comp.get('sortino', 0),
-                'calmar': comp.get('calmar', 0),
-                'profit_factor': comp.get('profit_factor', 0),
-                'composite_score': comp.get('composite_score', 0),
+                'sharpe': float(comp.get('sharpe', 0)),
+                'sortino': float(comp.get('sortino', 0)),
+                'calmar': float(comp.get('calmar', 0)),
+                'profit_factor': float(comp.get('profit_factor', 0)),
+                'composite_score': float(comp.get('composite_score', 0)),
                 'window_number': window_number
             })
 composite_df = pd.DataFrame(composite_data)
 
 if not composite_df.empty:
     st.subheader("Composite Score Trend")
-    fig = px.line(composite_df, x='window_number', y='composite_score', title="Composite Score Across Windows")
+    if len(composite_df) == 1:
+        # Single point - use scatter plot with larger markers
+        fig = px.scatter(composite_df, x='window_number', y='composite_score',
+                        title="Composite Score Across Windows",
+                        size=[20],  # Larger marker
+                        color_discrete_sequence=['red'])
+        fig.update_traces(mode='markers+text',
+                         text=composite_df['composite_score'].round(3),
+                         textposition="top center")
+    else:
+        # Multiple points - use line plot
+        fig = px.line(composite_df, x='window_number', y='composite_score',
+                     title="Composite Score Across Windows",
+                     markers=True)  # Add markers to line
     st.plotly_chart(fig)
+else:
+    st.write("No composite data available")
 
 # Select window for detailed view
 window_options = windows_df['_id'].tolist() + ["global"]
